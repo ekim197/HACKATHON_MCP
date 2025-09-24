@@ -19,8 +19,14 @@ const CampaignIdSchema = z.string().min(1, 'Campaign ID is required');
 
 const CampaignFiltersSchema = z.object({
   status: z.enum(['ACTIVE', 'PAUSED', 'DELETED']).optional(),
-  limit: z.number().min(1).max(100).default(20).optional(),
-  offset: z.number().min(0).default(0).optional(),
+  page_limit: z.number().min(1).max(100).default(20).optional(),
+  page_token: z.string().optional(),
+}).optional();
+
+const AdGroupFiltersSchema = z.object({
+  status: z.enum(['ACTIVE', 'PAUSED', 'DELETED']).optional(),
+  page_limit: z.number().min(1).max(100).default(20).optional(),
+  page_token: z.string().optional(),
 }).optional();
 
 const CampaignCreateSchema = z.object({
@@ -101,18 +107,16 @@ class UberExternalAdsAPIServer {
                       enum: ['ACTIVE', 'PAUSED', 'DELETED'],
                       description: 'Filter campaigns by status',
                     },
-                    limit: {
+                    page_limit: {
                       type: 'number',
                       minimum: 1,
                       maximum: 100,
                       default: 20,
-                      description: 'Number of campaigns to return',
+                      description: 'Maximum number of campaigns to return per page',
                     },
-                    offset: {
-                      type: 'number',
-                      minimum: 0,
-                      default: 0,
-                      description: 'Number of campaigns to skip',
+                    page_token: {
+                      type: 'string',
+                      description: 'Token for retrieving the next page of results. Use the next_page_token from previous response.',
                     },
                   },
                   additionalProperties: false,
@@ -139,6 +143,51 @@ class UberExternalAdsAPIServer {
                 campaign_id: {
                   type: 'string',
                   description: 'The campaign UUID',
+                },
+              },
+              required: ['ad_account_id', 'campaign_id'],
+              additionalProperties: false,
+            },
+          },
+          {
+            name: 'get_ad_groups',
+            description: 'Get ad groups for a specific campaign',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                auth_token: {
+                  type: 'string',
+                  description: 'Bearer token for authentication',
+                },
+                ad_account_id: {
+                  type: 'string',
+                  description: 'The ad account UUID',
+                },
+                campaign_id: {
+                  type: 'string',
+                  description: 'The campaign UUID to get ad groups for',
+                },
+                filters: {
+                  type: 'object',
+                  properties: {
+                    status: {
+                      type: 'string',
+                      enum: ['ACTIVE', 'PAUSED', 'DELETED'],
+                      description: 'Filter ad groups by status',
+                    },
+                    page_limit: {
+                      type: 'number',
+                      minimum: 1,
+                      maximum: 100,
+                      default: 20,
+                      description: 'Maximum number of ad groups to return per page',
+                    },
+                    page_token: {
+                      type: 'string',
+                      description: 'Token for retrieving the next page of results. Use the next_page_token from previous response.',
+                    },
+                  },
+                  additionalProperties: false,
                 },
               },
               required: ['ad_account_id', 'campaign_id'],
@@ -289,6 +338,8 @@ class UberExternalAdsAPIServer {
             return await this.getCampaigns(args);
           case 'get_campaign':
             return await this.getCampaign(args);
+          case 'get_ad_groups':
+            return await this.getAdGroups(args);
           case 'create_campaign':
             return await this.createCampaign(args);
           case 'update_campaign':
@@ -328,11 +379,11 @@ class UberExternalAdsAPIServer {
     if (filters?.status) {
       params.append('status', filters.status);
     }
-    if (filters?.limit) {
-      params.append('limit', filters.limit.toString());
+    if (filters?.page_limit) {
+      params.append('page_limit', filters.page_limit.toString());
     }
-    if (filters?.offset) {
-      params.append('offset', filters.offset.toString());
+    if (filters?.page_token) {
+      params.append('page_token', filters.page_token);
     }
 
     try {
@@ -343,11 +394,30 @@ class UberExternalAdsAPIServer {
         },
       });
 
+      // Extract pagination info from response
+      const data = response.data;
+      const hasNextPage = data.next_page_token ? true : false;
+      const campaignCount = data.campaigns ? data.campaigns.length : 0;
+      
+      let responseText = JSON.stringify(data, null, 2);
+      
+      // Add pagination summary at the top
+      if (hasNextPage || filters?.page_token) {
+        responseText = `📄 Pagination Info:
+- Campaigns returned: ${campaignCount}
+- Has next page: ${hasNextPage ? 'Yes' : 'No'}
+${hasNextPage ? `- Next page token: ${data.next_page_token}` : ''}
+${filters?.page_token ? `- Current page token: ${filters.page_token}` : ''}
+
+📊 Campaign Data:
+${responseText}`;
+      }
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(response.data, null, 2),
+            text: responseText,
           },
         ],
       };
@@ -376,6 +446,66 @@ class UberExternalAdsAPIServer {
           {
             type: 'text',
             text: JSON.stringify(response.data, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      return this.handleApiError(error);
+    }
+  }
+
+  private async getAdGroups(args: any) {
+    const authToken = this.getAuthToken(args.auth_token);
+    const adAccountId = AdAccountIdSchema.parse(args.ad_account_id);
+    const campaignId = CampaignIdSchema.parse(args.campaign_id);
+    const filters = AdGroupFiltersSchema.parse(args.filters);
+
+    const url = `${UBER_ADS_API_BASE_URL}/${adAccountId}/campaigns/${campaignId}/ad-groups`;
+    const params = new URLSearchParams();
+
+    if (filters?.status) {
+      params.append('status', filters.status);
+    }
+    if (filters?.page_limit) {
+      params.append('page_limit', filters.page_limit.toString());
+    }
+    if (filters?.page_token) {
+      params.append('page_token', filters.page_token);
+    }
+
+    try {
+      const response = await axios.get(`${url}?${params.toString()}`, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`,
+          'Accept': 'application/json',
+        },
+      });
+
+      // Extract pagination info from response
+      const data = response.data;
+      const hasNextPage = data.next_page_token ? true : false;
+      const adGroupCount = data.adgroups ? data.adgroups.length : (data.ad_groups ? data.ad_groups.length : 0);
+      
+      let responseText = JSON.stringify(data, null, 2);
+      
+      // Add pagination summary at the top
+      if (hasNextPage || filters?.page_token) {
+        responseText = `📄 Pagination Info:
+- Ad groups returned: ${adGroupCount}
+- Has next page: ${hasNextPage ? 'Yes' : 'No'}
+${hasNextPage ? `- Next page token: ${data.next_page_token}` : ''}
+${filters?.page_token ? `- Current page token: ${filters.page_token}` : ''}
+- Campaign ID: ${campaignId}
+
+📊 Ad Groups Data:
+${responseText}`;
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
           },
         ],
       };
