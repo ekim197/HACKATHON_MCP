@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "uber-external-ads-api": {
+      "command": "node",
+      "args": ["/home/user/web-code/src/product/eats/ads-platform/ads-manager/mcp-poc/dist/index.js"],
+      "env": {
+        "UBER_ADS_AUTH_TOKEN": "IA.AQAAAATlHYAkrhJsBvg2h_K7dmXYDF_9LQAe8gEiCkd7Wyd79AB36AmskjmnMMPtDOwrWBgnGuHNb0Esrh2dScncw8weNgx5kjMNtxP88XJSdDzjfdOmcWe3Zvc0rHx-p5ldHqmXvDvUnjndiPqXigz_yg332ek6b_dmR-1KRus"
+      }
+    }
+  }
+}

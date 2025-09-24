@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "uber-ads": {
+      "command": "python",
+      "args": [
+        "-m", 
+        "uber_ads_mcp_server.server"
+      ],
+      "cwd": "/Users/esk007/Desktop/HACKATHON_MCP",
+      "env": {
+        "UBER_CLIENT_ID": "optional_for_hardcoded_token",
+        "UBER_CLIENT_SECRET": "optional_for_hardcoded_token", 
+        "UBER_BASE_URL": "https://api.uber.com"
+      }
+    }
+  }
+}
