@@ -46,6 +46,19 @@ const CampaignUpdateSchema = z.object({
   end_time: z.string().optional(),
 });
 
+const ReportRequestSchema = z.object({
+  account_id: z.string().min(1, 'Account ID is required'),
+  report_type: z.enum(['AD_PERFORMANCE', 'CAMPAIGN_PERFORMANCE', 'CREATIVE_PERFORMANCE']),
+  time_range: z.object({
+    start_time: z.string().min(1, 'Start time is required'),
+    end_time: z.string().min(1, 'End time is required'),
+  }),
+  columns: z.array(z.string()).min(1, 'At least one column is required'),
+  time_unit: z.enum(['SUMMARY', 'DAILY', 'WEEKLY', 'MONTHLY']),
+});
+
+const ReportIdSchema = z.string().min(1, 'Report ID is required');
+
 // Base API configuration
 const UBER_ADS_API_BASE_URL = 'https://api.uber.com/v1/ads';
 const DEFAULT_AUTH_TOKEN = process.env.UBER_ADS_AUTH_TOKEN || '';
@@ -325,6 +338,68 @@ class UberExternalAdsAPIServer {
               additionalProperties: false,
             },
           },
+          {
+            name: 'generate_report',
+            description: 'Generate a report for an ad account, poll until CSV is ready, and fetch the CSV data. Returns CSV data, download URL, and report schema (column meanings for headerless CSV).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                auth_token: {
+                  type: 'string',
+                  description: 'Bearer token for authentication',
+                },
+                ad_account_id: {
+                  type: 'string',
+                  description: 'The ad account UUID',
+                },
+                report_data: {
+                  type: 'object',
+                  properties: {
+                    account_id: {
+                      type: 'string',
+                      description: 'Account ID for the report',
+                    },
+                    report_type: {
+                      type: 'string',
+                      enum: ['AD_PERFORMANCE', 'CAMPAIGN_PERFORMANCE', 'CREATIVE_PERFORMANCE'],
+                      description: 'Type of report to generate',
+                    },
+                    time_range: {
+                      type: 'object',
+                      properties: {
+                        start_time: {
+                          type: 'string',
+                          description: 'Start time in ISO 8601 format (e.g., 2025-07-10T00:00:00Z)',
+                        },
+                        end_time: {
+                          type: 'string',
+                          description: 'End time in ISO 8601 format (e.g., 2025-07-21T00:00:00Z)',
+                        },
+                      },
+                      required: ['start_time', 'end_time'],
+                      additionalProperties: false,
+                    },
+                    columns: {
+                      type: 'array',
+                      items: {
+                        type: 'string',
+                      },
+                      description: 'Array of columns to include in the report (e.g., ["campaign_id", "currency_code", "ad_spend", "impressions", "clicks"])',
+                    },
+                    time_unit: {
+                      type: 'string',
+                      enum: ['SUMMARY', 'DAILY', 'WEEKLY', 'MONTHLY'],
+                      description: 'Time unit for aggregation',
+                    },
+                  },
+                  required: ['account_id', 'report_type', 'time_range', 'columns', 'time_unit'],
+                  additionalProperties: false,
+                },
+              },
+              required: ['ad_account_id', 'report_data'],
+              additionalProperties: false,
+            },
+          },
         ] as Tool[],
       };
     });
@@ -346,6 +421,8 @@ class UberExternalAdsAPIServer {
             return await this.updateCampaign(args);
           case 'delete_campaign':
             return await this.deleteCampaign(args);
+          case 'generate_report':
+            return await this.generateReport(args);
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
@@ -599,6 +676,187 @@ ${responseText}`;
     } catch (error) {
       return this.handleApiError(error);
     }
+  }
+
+  private async generateReport(args: any) {
+    const authToken = this.getAuthToken(args.auth_token);
+    const adAccountId = AdAccountIdSchema.parse(args.ad_account_id);
+    const reportData = ReportRequestSchema.parse(args.report_data);
+
+    const url = `${UBER_ADS_API_BASE_URL}/${adAccountId}/reporting/report`;
+
+    try {
+      // Step 1: Generate the report
+      const response = await axios.post(url, reportData, {
+        headers: {
+          'Authorization': `Bearer ${authToken}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const reportId = response.data.report_id;
+      if (!reportId) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: 'Error: No report ID returned from API',
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Step 2: Poll for report status until CSV is ready
+      const pollResult = await this.pollReportStatus(authToken, adAccountId, reportId);
+
+      if (pollResult.success) {
+        // Step 3: Fetch the CSV data from the download URL
+        const csvResult = await this.fetchCsvData(pollResult.download_url);
+        
+        const responseData: any = {
+          report_id: reportId,
+          status: 'COMPLETED',
+          download_url: pollResult.download_url,
+          report_schema: pollResult.report_schema,
+          file_size: pollResult.file_size,
+          url_expires_at: pollResult.url_expires_at,
+          message: pollResult.message,
+          schema_info: {
+            description: "The CSV file has no headers. Use the report_schema array to understand column meanings.",
+            columns: pollResult.report_schema
+          },
+          full_response: pollResult.data
+        };
+
+        if (csvResult.success) {
+          responseData.csv_data = csvResult.data;
+          responseData.csv_fetch_status = 'SUCCESS';
+        } else {
+          responseData.csv_fetch_status = 'FAILED';
+          responseData.csv_fetch_error = csvResult.error;
+        }
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(responseData, null, 2),
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                report_id: reportId,
+                status: 'FAILED',
+                message: pollResult.message,
+                full_response: pollResult.data || null
+              }, null, 2),
+            },
+          ],
+          isError: true,
+        };
+      }
+    } catch (error) {
+      return this.handleApiError(error);
+    }
+  }
+
+  private async fetchCsvData(downloadUrl: string): Promise<{success: boolean, data?: string, error?: string}> {
+    try {
+      const response = await axios.get(downloadUrl, {
+        headers: {
+          'Accept': 'text/csv',
+        },
+        timeout: 30000, // 30 second timeout for CSV download
+      });
+
+      return {
+        success: true,
+        data: response.data
+      };
+    } catch (error) {
+      const errorMessage = axios.isAxiosError(error) 
+        ? `Failed to fetch CSV: HTTP ${error.response?.status} ${error.response?.statusText}`
+        : `Failed to fetch CSV: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      
+      return {
+        success: false,
+        error: errorMessage
+      };
+    }
+  }
+
+  private async pollReportStatus(authToken: string, adAccountId: string, reportId: string): Promise<any> {
+    const url = `${UBER_ADS_API_BASE_URL}/${adAccountId}/reporting/${reportId}`;
+    const maxAttempts = 60; // 5 minutes max (60 attempts * 5 seconds)
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+            'Accept': 'application/json',
+          },
+        });
+
+        const status = response.data.status;
+
+        // If report is ready and has a download URL, return it
+        if (status === 'COMPLETED' && response.data.result?.success_result?.report_url) {
+          return {
+            success: true,
+            data: response.data,
+            download_url: response.data.result.success_result.report_url,
+            report_schema: response.data.result.success_result.report_schema || [],
+            file_size: response.data.result.success_result.file_size,
+            url_expires_at: response.data.result.success_result.url_expires_at,
+            message: `Report completed successfully. CSV available at: ${response.data.result.success_result.report_url}`
+          };
+        }
+
+        // If report failed, return error
+        if (status === 'FAILED') {
+          return {
+            success: false,
+            data: response.data,
+            message: 'Report generation failed'
+          };
+        }
+
+        // If still processing, wait and try again
+        if (status === 'PROCESSING' || status === 'PENDING') {
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+          continue;
+        }
+
+        // Unknown status
+        return {
+          success: false,
+          data: response.data,
+          message: `Unknown report status: ${status}`
+        };
+
+      } catch (error) {
+        attempts++;
+        if (attempts >= maxAttempts) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds before retry
+      }
+    }
+
+    return {
+      success: false,
+      message: 'Report polling timeout after 5 minutes'
+    };
   }
 
   private handleApiError(error: unknown) {
